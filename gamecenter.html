@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>GameControl V14.3 Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com');
+        body { background-color: #0f172a; font-family: sans-serif; color: white; user-select: none; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        .card-active { border: 2px solid #22c55e; background: #064e3b; }
+        .card-free { border: 2px solid #3b82f6; background: #1e3a8a; }
+        .card-inactive { border: 1px solid #334155; background: #1e293b; }
+    </style>
+</head>
+<body>
+
+    <audio id="alerta-audio" preload="auto"></audio>
+
+    <nav class="bg-slate-800 p-4 sticky top-0 z-50 flex justify-between items-center border-b border-slate-700 shadow-xl">
+        <h1 class="text-lg font-black text-green-500 uppercase tracking-tighter">GAME<span class="text-white">CENTER</span></h1>
+        <button onclick="toggleAdmin()" class="bg-blue-600 px-4 py-2 rounded-full font-bold text-xs active:scale-95 transition-all">⚙️ ADMIN</button>
+    </nav>
+
+    <main id="grid-consolas" class="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 md:gap-6"></main>
+
+    <!-- MODAL ADMIN -->
+    <div id="modal-admin" class="fixed inset-0 bg-slate-950/95 hidden z-[100] flex justify-center items-center p-4 backdrop-blur-md">
+        <div class="bg-slate-800 w-full max-w-xl rounded-3xl p-6 border border-slate-700 shadow-2xl overflow-y-auto max-h-[90vh]">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-xl font-bold text-blue-400 uppercase tracking-widest">Administración</h2>
+                <button onclick="toggleAdmin()" class="text-3xl text-slate-400">&times;</button>
+            </div>
+            
+            <div class="bg-slate-900 p-6 rounded-2xl mb-6 border border-slate-700 text-center">
+                <p class="text-slate-400 text-[10px] uppercase font-bold tracking-widest mb-1">Venta del Día</p>
+                <p id="venta-total" class="text-4xl font-mono text-green-400 font-bold">$0</p>
+            </div>
+
+            <div class="space-y-4">
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="text-[10px] uppercase font-bold text-slate-500">Precio Base Hr</label>
+                        <input type="number" id="p-hora" class="w-full bg-slate-900 p-3 rounded-xl border border-slate-700 outline-none text-white font-mono">
+                    </div>
+                    <div>
+                        <label class="text-[10px] uppercase font-bold text-slate-500">Extra Control</label>
+                        <input type="number" id="p-extra" class="w-full bg-slate-900 p-3 rounded-xl border border-slate-700 outline-none text-white font-mono">
+                    </div>
+                </div>
+
+                <div class="bg-slate-900/50 p-4 rounded-2xl border border-slate-700">
+                    <label class="block text-[10px] uppercase font-bold text-slate-500 mb-2">Audio Alerta (MP3)</label>
+                    <input type="file" id="audio-file" accept="audio/mp3" class="w-full text-[10px] text-slate-400 mb-3">
+                    <button onclick="probarSonido()" class="w-full bg-yellow-600/20 text-yellow-500 py-2 rounded-xl font-bold text-[10px] border border-yellow-600/50">🔔 PROBAR AUDIO</button>
+                </div>
+
+                <button onclick="guardarAjustes()" class="w-full bg-green-600 py-4 rounded-2xl font-bold text-sm uppercase">Guardar Cambios</button>
+                <button onclick="crearEstacion()" class="w-full bg-slate-700 py-4 rounded-2xl font-bold text-sm uppercase">+ Añadir Consola</button>
+                <button onclick="realizarCorte()" class="w-full bg-red-900/20 text-red-500 py-3 rounded-2xl font-bold text-[10px] border border-red-900/30 uppercase">Corte de Caja</button>
+                <button onclick="resetApp()" class="w-full text-[9px] text-slate-600 font-bold mt-4 uppercase">Reset App</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let estaciones = JSON.parse(localStorage.getItem('game_v14_db')) || [];
+        let config = JSON.parse(localStorage.getItem('game_v14_conf')) || { precioHora: 40, precioExtra: 10, customAudio: "" };
+        let ventaDia = parseInt(localStorage.getItem('game_v14_venta')) || 0;
+
+        const audioTag = document.getElementById('alerta-audio');
+        if(config.customAudio) audioTag.src = config.customAudio;
+
+        // --- MOTOR DE ACTUALIZACIÓN ---
+        function tick() {
+            const ahora = Date.now();
+            estaciones.forEach(est => {
+                if (est.activo && est.inicio) {
+                    est.segundosTranscurridos = Math.floor((ahora - est.inicio) / 1000);
+                    if (!est.modoLibre && est.segundosTranscurridos >= est.segundosTotal) {
+                        reproducirAlerta();
+                        est.activo = false;
+                        est.segundosTranscurridos = est.segundosTotal;
+                        render(); // Renderizar solo cuando cambia el estado de activo a inactivo
+                    }
+                }
+                actualizarVisualesConsola(est);
+            });
+            localStorage.setItem('game_v14_db', JSON.stringify(estaciones));
+        }
+        setInterval(tick, 1000);
+
+        // Actualiza el reloj y barra SIN redibujar el HTML (evita que se cierren los select)
+        function actualizarVisualesConsola(est) {
+            const elReloj = document.getElementById(`reloj-${est.id}`);
+            const elBarra = document.getElementById(`barra-${est.id}`);
+            if(!elReloj) return;
+
+            const tiempoDisp = est.modoLibre ? 
+                formatearTiempo(est.segundosTranscurridos) : 
+                formatearTiempo(Math.max(0, est.segundosTotal - est.segundosTranscurridos));
+            
+            elReloj.innerText = tiempoDisp;
+
+            if(elBarra) {
+                const porcentaje = est.modoLibre ? 100 : (est.segundosTotal > 0 ? Math.max(0, ((est.segundosTotal - est.segundosTranscurridos) / est.segundosTotal) * 100) : 0);
+                elBarra.style.width = `${porcentaje}%`;
+            }
+        }
+
+        function render() {
+            const grid = document.getElementById('grid-consolas');
+            grid.innerHTML = '';
+            estaciones.forEach(est => {
+                const precio = est.precioPropio || config.precioHora;
+                const colorClase = est.activo ? (est.modoLibre ? 'card-free' : 'card-active') : 'card-inactive';
+
+                grid.innerHTML += `
+                    <div class="rounded-3xl p-5 ${colorClase} transition-all shadow-xl" id="card-${est.id}">
+                        <div class="flex justify-between items-start mb-4">
+                            <div>
+                                <h3 class="font-black text-xl uppercase">${est.nombre}</h3>
+                                <div class="flex gap-2 items-center text-[10px]">
+                                    <span class="text-green-400 font-bold">$${precio}/HR</span>
+                                    <button onclick="editarConsola(${est.id})" class="text-slate-400 underline">Editar</button>
+                                </div>
+                            </div>
+                            <p class="text-3xl font-mono font-black tracking-tighter" id="reloj-${est.id}">00:00</p>
+                        </div>
+                        <div class="w-full bg-black/20 h-2 rounded-full mb-5 overflow-hidden">
+                            <div class="h-full bg-white transition-all duration-1000" id="barra-${est.id}" style="width: 0%"></div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2 mb-4">
+                            <button onclick="añadirTiempo(${est.id}, 30)" class="bg-white/10 py-3 rounded-2xl text-[10px] font-bold">+30 MIN</button>
+                            <button onclick="añadirTiempo(${est.id}, 60)" class="bg-white/10 py-3 rounded-2xl text-[10px] font-bold">+1 HORA</button>
+                            <button onclick="iniciarLibre(${est.id})" class="bg-blue-500/20 text-blue-400 py-3 rounded-2xl text-[10px] font-bold border border-blue-500/30">LIBRE</button>
+                            <button onclick="cobrar(${est.id})" class="bg-red-600 text-white py-3 rounded-2xl text-[10px] font-bold uppercase">COBRAR</button>
+                        </div>
+                        <div class="flex items-center justify-between bg-black/20 p-2 rounded-2xl">
+                            <span class="text-[10px] font-bold ml-2">CONTROLES EXTRA</span>
+                            <select onchange="setExtras(${est.id}, this.value)" class="bg-transparent font-bold text-sm outline-none cursor-pointer p-1">
+                                <option value="0" ${est.controlesExtras == 0 ? 'selected' : ''} class="text-black">0</option>
+                                <option value="1" ${est.controlesExtras == 1 ? 'selected' : ''} class="text-black">1</option>
+                                <option value="2" ${est.controlesExtras == 2 ? 'selected' : ''} class="text-black">2</option>
+                                <option value="3" ${est.controlesExtras == 3 ? 'selected' : ''} class="text-black">3</option>
+                            </select>
+                        </div>
+                    </div>`;
+            });
+            document.getElementById('venta-total').innerText = `$${ventaDia}`;
+        }
+
+        // --- FUNCIONES DE LÓGICA ---
+        function añadirTiempo(id, mins) {
+            const est = estaciones.find(e => e.id === id);
+            if (!est.activo || est.modoLibre) {
+                est.inicio = Date.now(); est.segundosTotal = mins * 60; est.modoLibre = false; est.activo = true; est.segundosTranscurridos = 0;
+                render();
+            } else { est.segundosTotal += mins * 60; }
+        }
+
+        function iniciarLibre(id) {
+            const est = estaciones.find(e => e.id === id);
+            est.inicio = Date.now(); est.modoLibre = true; est.activo = true; est.segundosTotal = 0; est.segundosTranscurridos = 0;
+            render();
+        }
+
+        function cobrar(id) {
+            const est = estaciones.find(e => e.id === id);
+            if (!est.activo && (!est.segundosTranscurridos || est.segundosTranscurridos <= 0)) return;
+            const segs = est.modoLibre ? est.segundosTranscurridos : est.segundosTotal;
+            const bloques = Math.ceil(segs / 1800);
+            const total = (bloques * ((est.precioPropio || config.precioHora) / 2)) + (est.controlesExtras * config.precioExtra);
+            if (confirm(`¿Cobrar $${total}?`)) {
+                ventaDia += total;
+                localStorage.setItem('game_v14_venta', ventaDia);
+                est.activo = false; est.segundosTotal = 0; est.segundosTranscurridos = 0; est.inicio = null; est.controlesExtras = 0; est.modoLibre = false;
+                render();
+            }
+        }
+
+        function crearEstacion() {
+            const n = prompt("Nombre Consola:");
+            const p = prompt("Precio por Hora:", config.precioHora);
+            if(n) {
+                estaciones.push({ id: Date.now(), nombre: n, precioPropio: parseInt(p), activo: false, segundosTotal: 0, segundosTranscurridos: 0, inicio: null, controlesExtras: 0, modoLibre: false });
+                localStorage.setItem('game_v14_db', JSON.stringify(estaciones));
+                render();
+            }
+        }
+
+        function editarConsola(id) {
+            const est = estaciones.find(e => e.id === id);
+            const nN = prompt("Nombre:", est.nombre);
+            const nP = prompt("Precio:", est.precioPropio || config.precioHora);
+            if(nN) est.nombre = nN;
+            if(nP) est.precioPropio = parseInt(nP);
+            if(confirm("¿Eliminar consola?")) estaciones = estaciones.filter(e => e.id !== id);
+            localStorage.setItem('game_v14_db', JSON.stringify(estaciones));
+            render();
+        }
+
+        function toggleAdmin() {
+            document.getElementById('modal-admin').classList.toggle('hidden');
+            document.getElementById('p-hora').value = config.precioHora;
+            document.getElementById('p-extra').value = config.precioExtra;
+        }
+
+        function guardarAjustes() {
+            config.precioHora = parseInt(document.getElementById('p-hora').value);
+            config.precioExtra = parseInt(document.getElementById('p-extra').value);
+            localStorage.setItem('game_v14_conf', JSON.stringify(config));
+            toggleAdmin();
+            render();
+        }
+
+        function setExtras(id, cant) { 
+            const est = estaciones.find(e => e.id === id);
+            if(est) est.controlesExtras = parseInt(cant); 
+            localStorage.setItem('game_v14_db', JSON.stringify(estaciones));
+        }
+
+        document.getElementById('audio-file').addEventListener('change', function(e) {
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                config.customAudio = ev.target.result;
+                audioTag.src = config.customAudio;
+                localStorage.setItem('game_v14_conf', JSON.stringify(config));
+                alert("Audio guardado");
+            };
+            if(e.target.files[0]) reader.readAsDataURL(e.target.files[0]);
+        });
+
+        function reproducirAlerta() { audioTag.currentTime = 0; audioTag.play().catch(()=>{}); }
+        function probarSonido() { reproducirAlerta(); }
+        function realizarCorte() { if(confirm("¿Corte de caja?")) { ventaDia = 0; localStorage.setItem('game_v14_venta', 0); render(); } }
+        function resetApp() { if(confirm("Borrar todo?")) { localStorage.clear(); location.reload(); } }
+        function formatearTiempo(segs) {
+            const h = Math.floor(segs / 3600); const m = Math.floor((segs % 3600) / 60); const s = segs % 60;
+            return `${h > 0 ? h + ':' : ''}${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        }
+        
+        render();
+    </script>
+</body>
+</html>

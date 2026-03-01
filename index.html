@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ConsoleManager Pro v6.2 - Edición Final</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .timer-card { transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); border-left-width: 10px; }
+        .status-active { border-left-color: #3b82f6; }
+        .status-libre { border-left-color: #10b981; }
+        .status-finished { animation: emergency-flash 0.5s infinite alternate !important; border-left-color: #ffffff !important; }
+        @keyframes emergency-flash { 
+            0% { background-color: #0f172a !important; box-shadow: 0 0 40px rgba(239, 68, 68, 0.7); }
+            100% { background-color: #dc2626 !important; box-shadow: 0 0 0px rgba(239, 68, 68, 0); }
+        }
+        .no-select { user-select: none; -webkit-tap-highlight-color: transparent; }
+        #pin-notify { transform: translateY(-100px); transition: transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        #pin-notify.show { transform: translateY(20px); }
+        .custom-scroll::-webkit-scrollbar { width: 4px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans no-select" onload="app.init()">
+
+    <div id="pin-notify" class="fixed top-0 left-0 right-0 flex justify-center z-[100] pointer-events-none">
+        <div class="bg-emerald-600 text-white px-6 py-3 rounded-2xl shadow-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3">
+            <span class="text-xl">🔐</span> SISTEMA ACTUALIZADO
+        </div>
+    </div>
+
+    <header class="bg-slate-900/80 backdrop-blur-md p-4 sticky top-0 z-50 border-b border-white/5 flex justify-between items-center shadow-xl">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center font-black shadow-lg">CP</div>
+            <div>
+                <h2 class="text-sm font-black tracking-tighter uppercase italic leading-none text-white">Console<span class="text-blue-500">Pro v6.2</span></h2>
+                <p id="cajero-tag" class="text-[9px] text-slate-500 font-bold uppercase mt-1 tracking-widest italic leading-none">---</p>
+            </div>
+        </div>
+        <div class="flex gap-2">
+            <button onclick="ui.checkAuth('caja')" class="px-4 py-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-xl text-[10px] font-black uppercase hover:bg-emerald-500/20 transition-all">💵 Caja</button>
+            <button onclick="ui.checkAuth('admin')" class="p-2 bg-slate-800 hover:bg-slate-700 rounded-xl border border-white/5 transition-all">⚙️</button>
+        </div>
+    </header>
+
+    <main id="consoles-grid" class="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 pb-32"></main>
+
+    <button onclick="app.addConsole()" class="fixed bottom-8 right-8 w-20 h-20 bg-blue-600 hover:bg-blue-500 rounded-[2rem] shadow-2xl flex items-center justify-center text-3xl z-40 border-t border-white/20 text-white transition-transform active:scale-95 shadow-blue-500/40">➕</button>
+
+    <div id="modal-overlay" class="fixed inset-0 bg-black/95 backdrop-blur-md z-[60] hidden flex items-center justify-center p-4">
+        <div id="modal-content" class="bg-slate-900 w-full max-w-lg rounded-[2.5rem] border border-white/10 shadow-2xl overflow-hidden"></div>
+    </div>
+
+    <audio id="alarm-sound" loop preload="auto"></audio>
+
+    <script>
+        const app = {
+            state: {
+                consoles: [],
+                config: { 
+                    rateMin: 1.0, rate15: 15, rate30: 25, rate60: 45, rateExtra: 10, 
+                    adminPass: '1234', activeCajero: 'Admin',
+                    alarmBase64: null 
+                },
+                cajeros: ['Admin'],
+                historial: []
+            },
+
+            init() {
+                this.load();
+                this.startTicker();
+                this.syncAlarm();
+                ui.render();
+            },
+
+            load() {
+                const saved = localStorage.getItem('cp_v6_final_pro');
+                if (saved) this.state = Object.assign(this.state, JSON.parse(saved));
+                document.getElementById('cajero-tag').innerText = this.state.config.activeCajero;
+            },
+
+            save() { localStorage.setItem('cp_v6_final_pro', JSON.stringify(this.state)); },
+
+            syncAlarm() {
+                const aud = document.getElementById('alarm-sound');
+                aud.src = this.state.config.alarmBase64 || 'https://assets.mixkit.co';
+                aud.load();
+            },
+
+            calculateTotal(c) {
+                const totalSegundos = (c.mode === 'libre') ? (c.timeLeft || 0) : (c.initialTime - c.timeLeft);
+                const minutes = Math.max(0, Math.ceil(totalSegundos / 60));
+                const cfg = this.state.config;
+                
+                // Lógica de Precios Original:
+                let tPrice = (minutes >= 60) ? (minutes / 60) * cfg.rate60 : 
+                             (minutes >= 30) ? cfg.rate30 : 
+                             (minutes >= 15) ? cfg.rate15 : 
+                             minutes * cfg.rateMin;
+
+                c.total = tPrice + (c.extras * cfg.rateExtra);
+                return c.total;
+            },
+
+            startTicker() {
+                setInterval(() => {
+                    let alarm = false;
+                    const ahora = Date.now();
+                    this.state.consoles.forEach(c => {
+                        if (c.status === 'active') {
+                            if (c.mode === 'timer') {
+                                c.timeLeft = Math.max(0, Math.round((c.endTime - ahora) / 1000));
+                                if (c.timeLeft <= 0) { c.status = 'finished'; alarm = true; ui.render(); }
+                            } else {
+                                c.timeLeft = Math.round((ahora - c.startTime) / 1000);
+                            }
+                            this.calculateTotal(c);
+                            ui.updateLive(c.id, c.timeLeft, c.total);
+                        }
+                    });
+                    if (alarm) ui.playAlarm();
+                }, 1000);
+            },
+
+            addConsole() {
+                this.state.consoles.push({ id: Date.now(), name: `CONSOLA ${this.state.consoles.length + 1}`, timeLeft: 0, initialTime: 0, status: 'idle', mode: 'timer', total: 0, extras: 0 });
+                this.save(); ui.render();
+            }
+        };
+
+        const ui = {
+            render() {
+                const grid = document.getElementById('consoles-grid');
+                grid.innerHTML = app.state.consoles.map(c => `
+                    <div class="timer-card bg-slate-900 p-6 rounded-[2.5rem] border border-white/5 status-${c.status} shadow-2xl relative">
+                        <div class="flex justify-between items-center mb-4">
+                            <input onchange="ui.rename(${c.id}, this.value)" value="${c.name}" class="bg-transparent font-black italic uppercase outline-none focus:text-blue-400 w-2/3 text-white">
+                            <button onclick="ui.deleteConsole(${c.id})" class="w-8 h-8 flex items-center justify-center bg-red-900/20 text-red-500 rounded-full hover:bg-red-500 transition-all text-[10px]">✕</button>
+                        </div>
+                        <div class="bg-black/40 rounded-[2rem] py-8 text-center border border-white/5 mb-4 shadow-inner">
+                            <div id="timer-${c.id}" class="text-5xl font-mono font-black tracking-tighter text-blue-500">${this.formatTime(c.timeLeft)}</div>
+                            <p class="text-[8px] uppercase tracking-widest text-slate-500 mt-2 font-bold">${c.mode === 'libre' ? '⏱️ Tiempo Libre' : '⏳ Cuenta Regresiva'}</p>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2 mb-4">
+                            <button onclick="ui.showTimeModal(${c.id})" class="bg-slate-800 hover:bg-blue-600 p-3 rounded-2xl text-[9px] font-black uppercase border border-white/5 transition-all">⏱️ Fijo</button>
+                            <button onclick="ui.startLibre(${c.id})" class="bg-slate-800 hover:bg-emerald-600 p-3 rounded-2xl text-[9px] font-black uppercase border border-white/5 transition-all">∞ Libre</button>
+                        </div>
+                        <div class="flex items-center justify-between bg-black/20 p-3 rounded-2xl border border-white/5 mb-4">
+                            <span class="text-[9px] font-black uppercase text-slate-400 ml-2 italic">Extras / Snacks</span>
+                            <div class="flex items-center gap-3">
+                                <button onclick="ui.modExtra(${c.id}, -1)" class="w-8 h-8 bg-slate-800 rounded-lg font-black">-</button>
+                                <span id="extra-${c.id}" class="font-black text-blue-400">${c.extras}</span>
+                                <button onclick="ui.modExtra(${c.id}, 1)" class="w-8 h-8 bg-slate-800 rounded-lg font-black text-emerald-400">+</button>
+                            </div>
+                        </div>
+                        <div class="flex justify-between items-center bg-emerald-500/5 p-4 rounded-2xl border border-emerald-500/10">
+                            <div><p id="price-${c.id}" class="text-2xl font-black text-emerald-400 tracking-tighter">$${c.total.toFixed(2)}</p></div>
+                            <button onclick="ui.cobrar(${c.id})" class="bg-white text-black px-6 py-3 rounded-xl font-black text-[10px] uppercase shadow-lg active:scale-95 transition-transform">Cobrar</button>
+                        </div>
+                    </div>
+                `).join('');
+            },
+
+            formatTime(s) {
+                const h = Math.floor(s / 3600).toString().padStart(2, '0');
+                const m = Math.floor((s % 3600) / 60).toString().padStart(2, '0');
+                const sec = (s % 60).toString().padStart(2, '0');
+                return `${h}:${m}:${sec}`;
+            },
+
+            updateLive(id, s, price) {
+                const t = document.getElementById(`timer-${id}`);
+                const p = document.getElementById(`price-${id}`);
+                if (t) t.innerText = this.formatTime(s);
+                if (p) p.innerText = `$${price.toFixed(2)}`;
+            },
+
+            modExtra(id, val) {
+                const c = app.state.consoles.find(c => c.id === id);
+                c.extras = Math.max(0, c.extras + val);
+                app.calculateTotal(c); app.save(); this.render();
+            },
+
+            startLibre(id) {
+                const c = app.state.consoles.find(c => c.id === id);
+                c.mode = 'libre'; c.status = 'active'; c.startTime = Date.now();
+                app.save(); this.render();
+            },
+
+            showTimeModal(id) {
+                const m = document.getElementById('modal-overlay');
+                const c = document.getElementById('modal-content');
+                m.classList.remove('hidden');
+                c.innerHTML = `
+                    <div class="p-8">
+                        <h3 class="text-xl font-black mb-6 text-center uppercase italic">Asignar Tiempo</h3>
+                        <div class="grid grid-cols-2 gap-4 mb-6">
+                            ${[15, 30, 60, 120].map(min => `<button onclick="ui.setTimer(${id}, ${min})" class="bg-slate-800 p-5 rounded-2xl font-black text-lg hover:bg-blue-600 border border-white/5 transition-all">${min}m</button>`).join('')}
+                        </div>
+                        <input id="custom-min" type="number" placeholder="Minutos Manuales" class="bg-black/40 border border-white/10 rounded-xl p-4 w-full text-center font-black mb-4">
+                        <button onclick="ui.setTimer(${id}, document.getElementById('custom-min').value)" class="w-full bg-emerald-600 p-4 rounded-xl font-black uppercase text-xs">Iniciar</button>
+                        <button onclick="ui.closeModal()" class="w-full mt-4 text-slate-500 font-bold uppercase text-[10px]">Cerrar</button>
+                    </div>
+                `;
+            },
+
+            setTimer(id, mins) {
+                if (!mins || mins <= 0) return;
+                const c = app.state.consoles.find(c => c.id === id);
+                c.mode = 'timer'; c.status = 'active'; c.initialTime = mins * 60;
+                c.endTime = Date.now() + (mins * 60 * 1000);
+                this.closeModal(); app.save(); this.render();
+            },
+
+            checkAuth(target) {
+                const p = prompt("🔐 Ingrese el PIN Maestro:");
+                if (p === app.state.config.adminPass) {
+                    this.showNotify();
+                    target === 'admin' ? this.toggleAdmin() : this.showCaja();
+                } else if(p !== null) alert("❌ PIN Incorrecto");
+            },
+
+            showNotify() {
+                const n = document.getElementById('pin-notify');
+                n.classList.add('show');
+                setTimeout(() => n.classList.remove('show'), 2500);
+            },
+
+            toggleAdmin() {
+                const m = document.getElementById('modal-overlay');
+                const c = document.getElementById('modal-content');
+                m.classList.remove('hidden');
+                c.innerHTML = `
+                    <div class="p-8 h-[85vh] overflow-y-auto custom-scroll">
+                        <h3 class="text-xl font-black mb-6 uppercase italic border-b border-white/10 pb-4">Ajustes de Precios y Sistema</h3>
+                        
+                        <div class="space-y-6">
+                            <div class="grid grid-cols-2 gap-4">
+                                <div><label class="text-[9px] font-black text-slate-500 uppercase">Minuto Suelto ($)</label>
+                                <input type="number" step="0.1" onchange="app.state.config.rateMin=Number(this.value)" value="${app.state.config.rateMin}" class="w-full bg-black/40 p-4 rounded-xl border border-white/10 font-black"></div>
+                                <div><label class="text-[9px] font-black text-slate-500 uppercase">Precio 15 Min</label>
+                                <input type="number" onchange="app.state.config.rate15=Number(this.value)" value="${app.state.config.rate15}" class="w-full bg-black/40 p-4 rounded-xl border border-white/10 font-black"></div>
+                                <div><label class="text-[9px] font-black text-slate-500 uppercase">Precio 30 Min</label>
+                                <input type="number" onchange="app.state.config.rate30=Number(this.value)" value="${app.state.config.rate30}" class="w-full bg-black/40 p-4 rounded-xl border border-white/10 font-black"></div>
+                                <div><label class="text-[9px] font-black text-slate-500 uppercase">Precio 1 Hora</label>
+                                <input type="number" onchange="app.state.config.rate60=Number(this.value)" value="${app.state.config.rate60}" class="w-full bg-black/40 p-4 rounded-xl border border-white/10 font-black"></div>
+                            </div>
+
+                            <div><label class="text-[9px] font-black text-slate-500 uppercase">Costo Extra Unitario ($)</label>
+                            <input type="number" onchange="app.state.config.rateExtra=Number(this.value)" value="${app.state.config.rateExtra}" class="w-full bg-black/40 p-4 rounded-xl border border-white/10 font-black"></div>
+
+                            <div class="bg-blue-600/5 p-5 rounded-2xl border border-blue-500/20">
+                                <label class="text-[9px] font-black text-blue-400 uppercase block mb-3">🎵 Audio Local Alarma (.mp3 / .wav)</label>
+                                <input type="file" id="audio-file" accept="audio/*" class="text-[10px] text-slate-400 mb-3 block w-full">
+                                <button onclick="ui.uploadAudio()" class="bg-blue-600 px-4 py-2 rounded-lg font-black text-[10px] uppercase">Cargar Audio</button>
+                                <p class="text-[8px] mt-2 italic text-slate-500">Actual: ${app.state.config.alarmBase64 ? 'Cargado ✅' : 'Predeterminado'}</p>
+                            </div>
+
+                            <div class="space-y-3">
+                                <label class="text-[9px] font-black text-emerald-400 uppercase">Gestión de Usuarios</label>
+                                <div class="flex gap-2">
+                                    <input id="new-cajero" type="text" placeholder="Nuevo Nombre" class="flex-1 bg-black/40 p-4 rounded-xl border border-white/10 font-black text-xs">
+                                    <button onclick="ui.addCajero()" class="bg-emerald-600 px-6 rounded-xl font-black text-xl">+</button>
+                                </div>
+                                <div class="space-y-2">
+                                    ${app.state.cajeros.map(u => `
+                                        <div class="flex justify-between items-center bg-black/40 p-3 rounded-xl border border-white/5">
+                                            <button onclick="ui.setCajero('${u}')" class="text-xs font-black uppercase ${app.state.config.activeCajero === u ? 'text-blue-400' : 'text-slate-400'}">${u}</button>
+                                            ${u !== 'Admin' ? `<button onclick="ui.delCajero('${u}')" class="text-red-500 font-black p-2">✕</button>` : ''}
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+
+                            <div>
+                                <label class="text-[9px] font-black text-slate-500 uppercase">Cambiar PIN Maestro</label>
+                                <input type="password" onchange="app.state.config.adminPass=this.value" value="${app.state.config.adminPass}" class="w-full bg-black/40 p-4 rounded-xl border border-white/10 font-black mt-1">
+                            </div>
+                        </div>
+                        <button onclick="app.save(); ui.closeModal(); ui.render();" class="w-full mt-8 bg-blue-600 p-5 rounded-2xl font-black uppercase text-xs shadow-lg active:scale-95 transition-all">Guardar Ajustes</button>
+                    </div>
+                `;
+            },
+
+            uploadAudio() {
+                const input = document.getElementById('audio-file');
+                if (!input.files[0]) return;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    app.state.config.alarmBase64 = e.target.result;
+                    app.syncAlarm();
+                    alert("Audio sincronizado.");
+                    this.toggleAdmin();
+                };
+                reader.readAsDataURL(input.files[0]);
+            },
+
+            addCajero() {
+                const n = document.getElementById('new-cajero').value.trim();
+                if(n && !app.state.cajeros.includes(n)) {
+                    app.state.cajeros.push(n); app.save(); this.toggleAdmin();
+                }
+            },
+
+            delCajero(n) {
+                if(confirm(`¿Borrar a ${n}?`)) {
+                    app.state.cajeros = app.state.cajeros.filter(u => u !== n);
+                    if(app.state.config.activeCajero === n) app.state.config.activeCajero = 'Admin';
+                    app.save(); this.toggleAdmin();
+                }
+            },
+
+            setCajero(n) {
+                app.state.config.activeCajero = n;
+                document.getElementById('cajero-tag').innerText = n;
+                app.save(); this.toggleAdmin();
+            },
+
+            showCaja() {
+                const total = app.state.historial.reduce((s, h) => s + h.total, 0);
+                const m = document.getElementById('modal-overlay');
+                const c = document.getElementById('modal-content');
+                m.classList.remove('hidden');
+                c.innerHTML = `
+                    <div class="p-8 h-[80vh] flex flex-col">
+                        <h3 class="text-xl font-black mb-1 uppercase italic text-emerald-400">Total en Caja</h3>
+                        <p class="text-4xl font-black mb-8">$${total.toFixed(2)}</p>
+                        <div class="flex-1 overflow-y-auto space-y-2 pr-2 custom-scroll">
+                            ${app.state.historial.slice().reverse().map(h => `
+                                <div class="bg-black/20 p-4 rounded-2xl border border-white/5 flex justify-between items-center text-[10px]">
+                                    <div><p class="font-black italic">${h.name}</p><p class="text-slate-500">${new Date(h.date).toLocaleTimeString()}</p></div>
+                                    <span class="font-black text-emerald-400">$${h.total.toFixed(2)}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                        <button onclick="if(confirm('¿Reiniciar?')){app.state.historial=[]; app.save(); ui.showCaja();}" class="mt-6 text-red-500 font-black text-[9px] uppercase italic text-center">Limpiar Historial</button>
+                        <button onclick="ui.closeModal()" class="w-full mt-4 bg-slate-800 p-4 rounded-xl font-black uppercase text-xs">Cerrar</button>
+                    </div>
+                `;
+            },
+
+            cobrar(id) {
+                const c = app.state.consoles.find(c => c.id === id);
+                app.state.historial.push({ name: c.name, total: c.total, date: Date.now() });
+                c.status = 'idle'; c.timeLeft = 0; c.extras = 0; c.total = 0;
+                document.getElementById('alarm-sound').pause();
+                app.save(); this.render();
+            },
+
+            closeModal() { document.getElementById('modal-overlay').classList.add('hidden'); },
+            playAlarm() { document.getElementById('alarm-sound').play(); },
+            rename(id, name) { const c = app.state.consoles.find(c => c.id === id); c.name = name; app.save(); },
+            deleteConsole(id) { if(confirm('¿Eliminar?')) { app.state.consoles = app.state.consoles.filter(c => c.id !== id); app.save(); this.render(); } }
+        };
+    </script>
+</body>
+</html>
